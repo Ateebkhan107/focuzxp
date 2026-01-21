@@ -1,19 +1,34 @@
-// Focus page: timer, XP, encouragement, and task management
+// Focus page: timer, XP, encouragement, and task management (PRODUCTION READY)
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
-const DEFAULT_TIME = 25 * 60; // 25 minutes
+// XP / level config
 const XP_PER_SESSION = 250;
 const LEVEL_XP = 500;
 
-// Encouragement checkpoints
+// Default focus minutes if user hasn't changed
+const DEFAULT_FOCUS_MINUTES = 25;
+
+// Encouragement checkpoints (in minutes)
 const CHECKPOINTS = [
-  { minute: 5, messages: ["Nice start. You're building momentum 💪", "Good focus. Keep going ✨"] },
-  { minute: 10, messages: ["You're 40% in — stay sharp 🔥", "Focus streak forming 🧠"] },
-  { minute: 15, messages: ["Halfway there. Don't break the flow 🚀", "Great discipline so far 💎"] },
-  { minute: 20, messages: ["Almost done. Finish strong 🏁", "Stay with it — you're close ⏳"] },
+  {
+    minute: 5,
+    messages: ["Nice start. You're building momentum 💪", "Good focus. Keep going ✨"],
+  },
+  {
+    minute: 10,
+    messages: ["You're 40% in — stay sharp 🔥", "Focus streak forming 🧠"],
+  },
+  {
+    minute: 15,
+    messages: ["Halfway there. Don't break the flow 🚀", "Great discipline so far 💎"],
+  },
+  {
+    minute: 20,
+    messages: ["Almost done. Finish strong 🏁", "Stay with it — you're close ⏳"],
+  },
 ];
 
 type Task = {
@@ -23,17 +38,41 @@ type Task = {
 };
 
 export default function Focus() {
-  const [time, setTime] = useState(DEFAULT_TIME);
+  // ----------------- Custom Timer Settings -----------------
+  const [focusMinutes, setFocusMinutes] = useState(DEFAULT_FOCUS_MINUTES);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  const focusSeconds = useMemo(() => focusMinutes * 60, [focusMinutes]);
+
+  // ----------------- Timer State -----------------
+  const [time, setTime] = useState(focusSeconds);
   const [running, setRunning] = useState(false);
 
+  // ----------------- User & XP -----------------
   const [user, setUser] = useState<any>(null);
   const [totalXP, setTotalXP] = useState(0);
 
+  // ----------------- Tasks -----------------
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskInput, setTaskInput] = useState("");
 
+  // ----------------- Encouragement -----------------
   const [encouragement, setEncouragement] = useState<string | null>(null);
   const [shownCheckpoints, setShownCheckpoints] = useState<number[]>([]);
+
+  const [saving, setSaving] = useState(false);
+
+  /* ================= Load settings from localStorage ================= */
+  useEffect(() => {
+    const stored = localStorage.getItem("focuzxp_focus_minutes");
+    if (stored) {
+      const val = Number(stored);
+      if (!Number.isNaN(val) && val >= 10 && val <= 180) {
+        setFocusMinutes(val);
+        setTime(val * 60);
+      }
+    }
+  }, []);
 
   /* ================= Load user + data ================= */
   useEffect(() => {
@@ -43,7 +82,7 @@ export default function Focus() {
 
       if (!data.user) return;
 
-      // Load XP safely
+      // Load XP
       const { data: profile } = await supabase
         .from("profiles")
         .select("total_xp")
@@ -65,6 +104,12 @@ export default function Focus() {
     load();
   }, []);
 
+  /* ================= When focusMinutes changes, reset timer (only if not running) ================= */
+  useEffect(() => {
+    if (!running) setTime(focusSeconds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusSeconds]);
+
   /* ================= Timer logic ================= */
   useEffect(() => {
     if (!running) return;
@@ -77,14 +122,18 @@ export default function Focus() {
     const timer = setInterval(() => {
       setTime((prev) => {
         const newTime = prev - 1;
-        const elapsedMinutes = Math.floor((DEFAULT_TIME - newTime) / 60);
+
+        // elapsedMinutes based on current focusSeconds
+        const elapsedMinutes = Math.floor((focusSeconds - newTime) / 60);
 
         CHECKPOINTS.forEach((cp) => {
-          if (elapsedMinutes === cp.minute && !shownCheckpoints.includes(cp.minute)) {
-            const msg = cp.messages[Math.floor(Math.random() * cp.messages.length)];
-            setEncouragement(msg);
-            setShownCheckpoints((p) => [...p, cp.minute]);
-            setTimeout(() => setEncouragement(null), 6000);
+          if (cp.minute < focusMinutes) {
+            if (elapsedMinutes === cp.minute && !shownCheckpoints.includes(cp.minute)) {
+              const msg = cp.messages[Math.floor(Math.random() * cp.messages.length)];
+              setEncouragement(msg);
+              setShownCheckpoints((p) => [...p, cp.minute]);
+              setTimeout(() => setEncouragement(null), 6000);
+            }
           }
         });
 
@@ -93,7 +142,7 @@ export default function Focus() {
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [running, time, shownCheckpoints]);
+  }, [running, time, shownCheckpoints, focusSeconds, focusMinutes]);
 
   /* ================= Tasks ================= */
   async function addTask() {
@@ -102,13 +151,13 @@ export default function Focus() {
     if (!user) {
       setTasks([...tasks, { id: crypto.randomUUID(), title: taskInput, completed: false }]);
     } else {
-      const { data } = await supabase
+      const { data, error } = await supabase
         .from("tasks")
         .insert({ user_id: user.id, title: taskInput })
         .select()
         .single();
 
-      if (data) setTasks([...tasks, data]);
+      if (!error && data) setTasks([...tasks, data]);
     }
 
     setTaskInput("");
@@ -128,34 +177,78 @@ export default function Focus() {
     setTasks(tasks.filter((t) => t.id !== id));
   }
 
-  /* ================= Session completion ================= */
+  /* ================= Session completion (IMPORTANT) ================= */
   async function completeSession() {
     setRunning(false);
-    setTime(DEFAULT_TIME);
+    setTime(focusSeconds);
     setShownCheckpoints([]);
     setEncouragement(null);
 
+    // ✅ Guest mode: no database save
     if (!user) return;
 
-    // ✅ SAFE XP INCREMENT (NO OVERWRITE)
-    const { error } = await supabase.rpc("add_xp", {
-      amount: XP_PER_SESSION,
-    });
+    if (saving) return; // prevent double save
+    setSaving(true);
 
-    if (error) {
-      console.error(error.message);
-      alert("Failed to save XP");
-      return;
+    try {
+      // ✅ 1) Insert into focus_sessions table (THIS FIXES LEADERBOARD/STATS)
+      const { error: sessionError } = await supabase.from("focus_sessions").insert({
+        user_id: user.id,
+        minutes: focusMinutes,
+        xp_earned: XP_PER_SESSION,
+      });
+
+      if (sessionError) {
+        console.error("focus_sessions insert error:", sessionError.message);
+        alert("Session save failed. Check RLS for focus_sessions.");
+        setSaving(false);
+        return;
+      }
+
+      // ✅ 2) Add XP safely (RPC)
+      const { error: xpError } = await supabase.rpc("add_xp", {
+        amount: XP_PER_SESSION,
+      });
+
+      if (xpError) {
+        console.error("add_xp rpc error:", xpError.message);
+        alert("XP update failed. Check RPC function + RLS.");
+        setSaving(false);
+        return;
+      }
+
+      // ✅ 3) Refresh XP from DB
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("total_xp")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      setTotalXP(profile?.total_xp ?? 0);
+    } finally {
+      setSaving(false);
     }
+  }
 
-    // Refresh XP from DB
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("total_xp")
-      .eq("id", user.id)
-      .maybeSingle();
+  /* ================= Helpers ================= */
+  function handleReset() {
+    setRunning(false);
+    setTime(focusSeconds);
+    setShownCheckpoints([]);
+    setEncouragement(null);
+  }
 
-    setTotalXP(profile?.total_xp ?? 0);
+  function saveSettings() {
+    let val = focusMinutes;
+    if (val < 10) val = 10;
+    if (val > 180) val = 180;
+
+    setFocusMinutes(val);
+    localStorage.setItem("focuzxp_focus_minutes", String(val));
+
+    if (!running) setTime(val * 60);
+
+    setSettingsOpen(false);
   }
 
   const level = Math.floor(totalXP / LEVEL_XP) + 1;
@@ -166,25 +259,36 @@ export default function Focus() {
     <main className="min-h-screen bg-[#f8fafc] pt-24 pb-20">
       <div className="max-w-6xl mx-auto px-4">
         <div className="max-w-2xl mx-auto flex flex-col gap-6">
-
           {/* Timer Card */}
           <div className="bg-white border rounded-2xl p-6 sm:p-8 text-center shadow-md">
-            <h1 className="text-xl sm:text-2xl font-semibold mb-6">Focus Session</h1>
+            <div className="flex items-center justify-between mb-5">
+              <h1 className="text-xl sm:text-2xl font-semibold">Focus Session</h1>
+
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="text-sm px-3 py-1.5 rounded-xl border hover:bg-slate-50 transition"
+              >
+                ⚙️ Settings
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-500 mb-2">
+              Current duration: <span className="font-semibold">{focusMinutes} min</span>
+            </p>
 
             <div className="text-5xl sm:text-6xl font-mono font-bold mb-6">
               {Math.floor(time / 60)}:{String(time % 60).padStart(2, "0")}
             </div>
 
             {encouragement && (
-              <div className="mb-6 text-blue-600 font-medium text-lg">
-                {encouragement}
-              </div>
+              <div className="mb-6 text-blue-600 font-medium text-lg">{encouragement}</div>
             )}
 
             <div className="flex flex-col sm:flex-row gap-3 justify-center">
               <button
                 onClick={() => setRunning(!running)}
-                className={`px-6 py-3 rounded-xl text-white ${
+                disabled={saving}
+                className={`px-6 py-3 rounded-xl text-white transition disabled:opacity-50 ${
                   running ? "bg-red-500 hover:bg-red-600" : "bg-blue-600 hover:bg-blue-700"
                 }`}
               >
@@ -192,17 +296,68 @@ export default function Focus() {
               </button>
 
               <button
-                onClick={() => {
-                  setRunning(false);
-                  setTime(DEFAULT_TIME);
-                  setShownCheckpoints([]);
-                  setEncouragement(null);
-                }}
-                className="border px-6 py-3 rounded-xl hover:bg-slate-50"
+                onClick={handleReset}
+                disabled={saving}
+                className="border px-6 py-3 rounded-xl hover:bg-slate-50 transition disabled:opacity-50"
               >
                 Reset
               </button>
             </div>
+
+            {/* Settings Modal */}
+            {settingsOpen && (
+              <div className="fixed inset-0 z-[999] flex items-center justify-center bg-black/40 px-4">
+                <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-lg p-6 text-left">
+                  <div className="flex items-center justify-between mb-4">
+                    <h2 className="text-lg font-bold text-slate-900">Timer Settings</h2>
+                    <button
+                      onClick={() => setSettingsOpen(false)}
+                      className="text-slate-400 hover:text-slate-700 transition"
+                      aria-label="Close settings"
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                    Focus duration (minutes)
+                  </label>
+
+                  <input
+                    type="number"
+                    min={10}
+                    max={180}
+                    value={focusMinutes}
+                    onChange={(e) => setFocusMinutes(Number(e.target.value))}
+                    className="w-full border rounded-xl px-4 py-3 mb-3"
+                  />
+
+                  <p className="text-xs text-slate-500 mb-5">Recommended: 25 / 50 / 90 minutes</p>
+
+                  {running && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-3 mb-4">
+                      Timer is running. Settings will apply after reset / next session.
+                    </p>
+                  )}
+
+                  <div className="flex gap-3">
+                    <button
+                      onClick={saveSettings}
+                      className="flex-1 bg-blue-600 text-white py-3 rounded-xl font-medium hover:bg-blue-700 transition"
+                    >
+                      Save
+                    </button>
+
+                    <button
+                      onClick={() => setSettingsOpen(false)}
+                      className="flex-1 border py-3 rounded-xl hover:bg-slate-50 transition"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* XP Card */}
@@ -217,6 +372,12 @@ export default function Focus() {
                 style={{ width: `${progressPercent}%` }}
               />
             </div>
+
+            {!user && (
+              <p className="text-xs text-slate-500 mt-2 text-center">
+                Login to save XP + session history
+              </p>
+            )}
           </div>
 
           {/* Tasks */}
@@ -233,7 +394,7 @@ export default function Focus() {
               />
               <button
                 onClick={addTask}
-                className="bg-blue-600 text-white px-6 py-2.5 rounded-xl"
+                className="bg-blue-600 text-white px-6 py-2.5 rounded-xl hover:bg-blue-700 transition"
               >
                 Add
               </button>
@@ -252,7 +413,12 @@ export default function Focus() {
                       {task.title}
                     </span>
                   </label>
-                  <button onClick={() => deleteTask(task.id)}>✕</button>
+                  <button
+                    onClick={() => deleteTask(task.id)}
+                    className="text-slate-400 hover:text-red-600 transition"
+                  >
+                    ✕
+                  </button>
                 </li>
               ))}
             </ul>
@@ -263,7 +429,6 @@ export default function Focus() {
               </p>
             )}
           </div>
-
         </div>
       </div>
     </main>
