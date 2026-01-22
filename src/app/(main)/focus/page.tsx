@@ -1,4 +1,4 @@
-// Focus page: timer, XP, encouragement, and task management (PRODUCTION READY)
+// Focus page: timer, XP, encouragement, and task management (PRODUCTION READY + IMPROVED TASKS)
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -35,7 +35,26 @@ type Task = {
   id: string;
   title: string;
   completed: boolean;
+  priority?: "low" | "medium" | "high" | string;
+  due_date?: string | null;
+  duration_min?: number | null;
+  spent_min?: number | null;
 };
+
+function todayISO() {
+  // local date -> YYYY-MM-DD
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function getPriorityStyles(priority?: string) {
+  if (priority === "high") return "bg-red-50 border-red-200 text-red-700";
+  if (priority === "low") return "bg-slate-50 border-slate-200 text-slate-700";
+  return "bg-amber-50 border-amber-200 text-amber-800"; // medium default
+}
 
 export default function Focus() {
   // ----------------- Custom Timer Settings -----------------
@@ -55,14 +74,21 @@ export default function Focus() {
   // ----------------- Tasks -----------------
   const [tasks, setTasks] = useState<Task[]>([]);
   const [taskInput, setTaskInput] = useState("");
+  const [taskPriority, setTaskPriority] = useState<"low" | "medium" | "high">("medium");
+  const [taskDuration, setTaskDuration] = useState<number>(25);
+  const [taskDueDate, setTaskDueDate] = useState<string>(todayISO());
 
   // ----------------- Encouragement -----------------
   const [encouragement, setEncouragement] = useState<string | null>(null);
   const [shownCheckpoints, setShownCheckpoints] = useState<number[]>([]);
 
+  // session saving
   const [saving, setSaving] = useState(false);
 
-  /* ================= Load settings from localStorage ================= */
+  // optional: “active task”
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+
+  /* ================= Load timer settings from localStorage ================= */
   useEffect(() => {
     const stored = localStorage.getItem("focuzxp_focus_minutes");
     if (stored) {
@@ -74,13 +100,16 @@ export default function Focus() {
     }
   }, []);
 
-  /* ================= Load user + data ================= */
+  /* ================= Load user + XP + tasks ================= */
   useEffect(() => {
     async function load() {
       const { data } = await supabase.auth.getUser();
       setUser(data.user);
 
-      if (!data.user) return;
+      if (!data.user) {
+        setTasks([]);
+        return;
+      }
 
       // Load XP
       const { data: profile } = await supabase
@@ -94,11 +123,11 @@ export default function Focus() {
       // Load tasks
       const { data: taskData } = await supabase
         .from("tasks")
-        .select("*")
+        .select("id, title, completed, priority, due_date, duration_min, spent_min, created_at")
         .eq("user_id", data.user.id)
         .order("created_at");
 
-      setTasks(taskData ?? []);
+      setTasks((taskData ?? []) as Task[]);
     }
 
     load();
@@ -123,7 +152,6 @@ export default function Focus() {
       setTime((prev) => {
         const newTime = prev - 1;
 
-        // elapsedMinutes based on current focusSeconds
         const elapsedMinutes = Math.floor((focusSeconds - newTime) / 60);
 
         CHECKPOINTS.forEach((cp) => {
@@ -145,53 +173,110 @@ export default function Focus() {
   }, [running, time, shownCheckpoints, focusSeconds, focusMinutes]);
 
   /* ================= Tasks ================= */
+  async function reloadTasks() {
+    if (!user) return;
+    const { data: taskData } = await supabase
+      .from("tasks")
+      .select("id, title, completed, priority, due_date, duration_min, spent_min, created_at")
+      .eq("user_id", user.id)
+      .order("created_at");
+    setTasks((taskData ?? []) as Task[]);
+  }
+
   async function addTask() {
     if (!taskInput.trim()) return;
 
     if (!user) {
-      setTasks([...tasks, { id: crypto.randomUUID(), title: taskInput, completed: false }]);
-    } else {
-      const { data, error } = await supabase
-        .from("tasks")
-        .insert({ user_id: user.id, title: taskInput })
-        .select()
-        .single();
-
-      if (!error && data) setTasks([...tasks, data]);
+      // guests: local only
+      setTasks([
+        ...tasks,
+        {
+          id: crypto.randomUUID(),
+          title: taskInput.trim(),
+          completed: false,
+          priority: taskPriority,
+          duration_min: taskDuration,
+          due_date: taskDueDate,
+          spent_min: 0,
+        },
+      ]);
+      setTaskInput("");
+      return;
     }
 
+    const { data, error } = await supabase
+      .from("tasks")
+      .insert({
+        user_id: user.id,
+        title: taskInput.trim(),
+        priority: taskPriority,
+        duration_min: taskDuration,
+        due_date: taskDueDate,
+        spent_min: 0,
+      })
+      .select()
+      .single();
+
+    if (error) {
+      alert(error.message);
+      return;
+    }
+
+    if (data) setTasks([...tasks, data as Task]);
     setTaskInput("");
   }
 
   async function toggleTask(task: Task) {
-    if (!user) {
-      setTasks(tasks.map((t) => (t.id === task.id ? { ...t, completed: !t.completed } : t)));
-    } else {
-      await supabase.from("tasks").update({ completed: !task.completed }).eq("id", task.id);
-      setTasks(tasks.map((t) => (t.id === task.id ? { ...t, completed: !t.completed } : t)));
-    }
+    // optimistic UI
+    setTasks(tasks.map((t) => (t.id === task.id ? { ...t, completed: !t.completed } : t)));
+
+    if (!user) return;
+
+    await supabase
+      .from("tasks")
+      .update({ completed: !task.completed })
+      .eq("id", task.id)
+      .eq("user_id", user.id);
   }
 
   async function deleteTask(id: string) {
-    if (user) await supabase.from("tasks").delete().eq("id", id);
     setTasks(tasks.filter((t) => t.id !== id));
+
+    if (!user) return;
+    await supabase.from("tasks").delete().eq("id", id).eq("user_id", user.id);
   }
 
-  /* ================= Session completion (IMPORTANT) ================= */
+  async function startFocusForTask(taskId: string, durationMin?: number | null) {
+    setActiveTaskId(taskId);
+
+    // if timer is not running, optionally sync duration to task duration
+    if (!running && durationMin && durationMin >= 10 && durationMin <= 180) {
+      setFocusMinutes(durationMin);
+      localStorage.setItem("focuzxp_focus_minutes", String(durationMin));
+      setTime(durationMin * 60);
+    }
+
+    setRunning(true);
+  }
+
+  /* ================= Session completion ================= */
   async function completeSession() {
     setRunning(false);
     setTime(focusSeconds);
     setShownCheckpoints([]);
     setEncouragement(null);
 
-    // ✅ Guest mode: no database save
-    if (!user) return;
+    if (!user) {
+      // guest: no DB save
+      setActiveTaskId(null);
+      return;
+    }
 
-    if (saving) return; // prevent double save
+    if (saving) return;
     setSaving(true);
 
     try {
-      // ✅ 1) Insert into focus_sessions table (THIS FIXES LEADERBOARD/STATS)
+      // 1) focus_sessions insert
       const { error: sessionError } = await supabase.from("focus_sessions").insert({
         user_id: user.id,
         minutes: focusMinutes,
@@ -199,25 +284,30 @@ export default function Focus() {
       });
 
       if (sessionError) {
-        console.error("focus_sessions insert error:", sessionError.message);
-        alert("Session save failed. Check RLS for focus_sessions.");
-        setSaving(false);
+        alert("Session save failed. Check RLS focus_sessions.");
         return;
       }
 
-      // ✅ 2) Add XP safely (RPC)
-      const { error: xpError } = await supabase.rpc("add_xp", {
-        amount: XP_PER_SESSION,
-      });
+      // 2) XP update
+      const { error: xpError } = await supabase.rpc("add_xp", { amount: XP_PER_SESSION });
 
       if (xpError) {
-        console.error("add_xp rpc error:", xpError.message);
-        alert("XP update failed. Check RPC function + RLS.");
-        setSaving(false);
+        alert("XP update failed. Check RPC add_xp.");
         return;
       }
 
-      // ✅ 3) Refresh XP from DB
+      // 3) If task was active, add spent minutes
+      if (activeTaskId) {
+        await supabase
+          .from("tasks")
+          .update({
+            spent_min: (tasks.find((t) => t.id === activeTaskId)?.spent_min ?? 0) + focusMinutes,
+          })
+          .eq("id", activeTaskId)
+          .eq("user_id", user.id);
+      }
+
+      // refresh XP
       const { data: profile } = await supabase
         .from("profiles")
         .select("total_xp")
@@ -225,6 +315,8 @@ export default function Focus() {
         .maybeSingle();
 
       setTotalXP(profile?.total_xp ?? 0);
+      await reloadTasks();
+      setActiveTaskId(null);
     } finally {
       setSaving(false);
     }
@@ -236,6 +328,7 @@ export default function Focus() {
     setTime(focusSeconds);
     setShownCheckpoints([]);
     setEncouragement(null);
+    setActiveTaskId(null);
   }
 
   function saveSettings() {
@@ -245,16 +338,18 @@ export default function Focus() {
 
     setFocusMinutes(val);
     localStorage.setItem("focuzxp_focus_minutes", String(val));
-
     if (!running) setTime(val * 60);
-
     setSettingsOpen(false);
   }
 
   const level = Math.floor(totalXP / LEVEL_XP) + 1;
   const progressPercent = ((totalXP % LEVEL_XP) / LEVEL_XP) * 100;
 
-  /* ================= UI ================= */
+  // Today tasks
+  const today = todayISO();
+  const todayTasks = tasks.filter((t) => (t.due_date ?? today) === today);
+  const plannedTasks = tasks.filter((t) => t.due_date && t.due_date !== today);
+
   return (
     <main className="min-h-screen bg-[#f8fafc] pt-24 pb-20">
       <div className="max-w-6xl mx-auto px-4">
@@ -271,6 +366,15 @@ export default function Focus() {
                 ⚙️ Settings
               </button>
             </div>
+
+            {activeTaskId && (
+              <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 px-3 py-2 rounded-xl mb-3">
+                Active task:{" "}
+                <span className="font-semibold">
+                  {tasks.find((t) => t.id === activeTaskId)?.title ?? "Task"}
+                </span>
+              </p>
+            )}
 
             <p className="text-xs text-slate-500 mb-2">
               Current duration: <span className="font-semibold">{focusMinutes} min</span>
@@ -374,59 +478,170 @@ export default function Focus() {
             </div>
 
             {!user && (
-              <p className="text-xs text-slate-500 mt-2 text-center">
-                Login to save XP + session history
-              </p>
+              <p className="text-xs text-slate-500 mt-2 text-center">Login to save XP + history</p>
             )}
           </div>
 
-          {/* Tasks */}
+          {/* Tasks (Upgraded) */}
           <div className="bg-white border rounded-2xl p-6 shadow-sm">
-            <h2 className="text-lg font-semibold mb-4">Tasks</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Today’s Plan</h2>
+              <p className="text-xs text-slate-500">{today}</p>
+            </div>
 
-            <div className="flex flex-col sm:flex-row gap-2 mb-4">
+            {/* Add Task */}
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 mb-4">
               <input
                 value={taskInput}
                 onChange={(e) => setTaskInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addTask()}
-                placeholder="What will you focus on?"
-                className="flex-1 border rounded-xl px-4 py-2.5"
+                placeholder="Task title"
+                className="sm:col-span-2 border rounded-xl px-4 py-2.5"
               />
+
+              <select
+                value={taskPriority}
+                onChange={(e) => setTaskPriority(e.target.value as any)}
+                className="border rounded-xl px-3 py-2.5"
+              >
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+
+              <select
+                value={taskDuration}
+                onChange={(e) => setTaskDuration(Number(e.target.value))}
+                className="border rounded-xl px-3 py-2.5"
+              >
+                <option value={15}>15 min</option>
+                <option value={25}>25 min</option>
+                <option value={45}>45 min</option>
+                <option value={60}>60 min</option>
+                <option value={90}>90 min</option>
+              </select>
+
+              <input
+                type="date"
+                value={taskDueDate}
+                onChange={(e) => setTaskDueDate(e.target.value)}
+                className="border rounded-xl px-3 py-2.5 sm:col-span-2"
+              />
+
               <button
                 onClick={addTask}
-                className="bg-blue-600 text-white px-6 py-2.5 rounded-xl hover:bg-blue-700 transition"
+                className="bg-blue-600 text-white px-6 py-2.5 rounded-xl hover:bg-blue-700 transition sm:col-span-2"
               >
-                Add
+                Add Task
               </button>
             </div>
 
+            {/* Today tasks */}
             <ul className="space-y-2">
-              {tasks.map((task) => (
-                <li key={task.id} className="flex justify-between p-3 rounded-xl border">
-                  <label className="flex gap-3 items-center">
-                    <input
-                      type="checkbox"
-                      checked={task.completed}
-                      onChange={() => toggleTask(task)}
-                    />
-                    <span className={task.completed ? "line-through text-slate-400" : ""}>
-                      {task.title}
-                    </span>
-                  </label>
-                  <button
-                    onClick={() => deleteTask(task.id)}
-                    className="text-slate-400 hover:text-red-600 transition"
-                  >
-                    ✕
-                  </button>
-                </li>
-              ))}
+              {todayTasks.map((task) => {
+                const spent = task.spent_min ?? 0;
+                const target = task.duration_min ?? 25;
+                const percent = Math.min(100, Math.floor((spent / target) * 100));
+
+                return (
+                  <li key={task.id} className="p-3 rounded-xl border">
+                    <div className="flex items-start justify-between gap-3">
+                      <label className="flex gap-3 items-start flex-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={task.completed}
+                          onChange={() => toggleTask(task)}
+                          className="mt-1"
+                        />
+                        <div className="flex-1">
+                          <p
+                            className={`font-medium ${
+                              task.completed ? "line-through text-slate-400" : "text-slate-800"
+                            }`}
+                          >
+                            {task.title}
+                          </p>
+
+                          <div className="mt-2 flex flex-wrap gap-2 items-center">
+                            <span
+                              className={`text-xs px-2 py-1 rounded-lg border ${getPriorityStyles(
+                                task.priority
+                              )}`}
+                            >
+                              {task.priority ?? "medium"} priority
+                            </span>
+
+                            <span className="text-xs px-2 py-1 rounded-lg border bg-slate-50 text-slate-700">
+                              🎯 {target} min
+                            </span>
+
+                            <span className="text-xs text-slate-500">
+                              Progress: {spent}/{target} min
+                            </span>
+                          </div>
+
+                          <div className="mt-2 w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                            <div
+                              className="bg-blue-600 h-full transition-all"
+                              style={{ width: `${percent}%` }}
+                            />
+                          </div>
+                        </div>
+                      </label>
+
+                      <div className="flex flex-col gap-2">
+                        <button
+                          onClick={() => startFocusForTask(task.id, task.duration_min)}
+                          className="text-xs px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition"
+                        >
+                          Start Focus
+                        </button>
+
+                        <button
+                          onClick={() => deleteTask(task.id)}
+                          className="text-xs px-3 py-2 rounded-xl border text-slate-500 hover:text-red-600 hover:bg-red-50 transition"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
 
-            {tasks.length === 0 && (
+            {todayTasks.length === 0 && (
               <p className="text-sm text-slate-400 text-center mt-4">
-                No tasks yet. Add one to get started!
+                No tasks for today. Add your plan 👇
               </p>
+            )}
+
+            {/* Planned */}
+            {plannedTasks.length > 0 && (
+              <>
+                <h3 className="text-sm font-semibold text-slate-700 mt-6 mb-2">Upcoming</h3>
+                <ul className="space-y-2">
+                  {plannedTasks.slice(0, 6).map((task) => (
+                    <li key={task.id} className="p-3 rounded-xl border bg-slate-50">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="font-medium text-slate-800">{task.title}</p>
+                          <p className="text-xs text-slate-500">
+                            📅 {task.due_date} • 🎯 {task.duration_min ?? 25} min •{" "}
+                            {task.priority ?? "medium"} priority
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => deleteTask(task.id)}
+                          className="text-xs px-3 py-2 rounded-xl border text-slate-500 hover:text-red-600 hover:bg-red-50 transition"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </>
             )}
           </div>
         </div>
